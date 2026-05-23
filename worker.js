@@ -1,7 +1,7 @@
 // ==========================================
 // 🔒 安全配置：请将下面的暗号改成你自己独有的密码（建议只用英文和数字）
 // ==========================================
-const SECRETPASSWORD = "bbsok828"; 
+const SECRETPASSWORD = "888"; 
 
 export default {
   async fetch(request, env, ctx) {
