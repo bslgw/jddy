@@ -1,7 +1,7 @@
 // ==========================================
 // 🔒 安全配置
 // ==========================================
-const SECRETPASSWORD = "bbsok828"; 
+const SECRETPASSWORD = "888"; 
 
 export default {
   async fetch(request, env, ctx) {
