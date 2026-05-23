@@ -1,4 +1,4 @@
-const SECRETPASSWORD = "bbsok828"; 
+const SECRETPASSWORD = "888"; 
 
 export default {
   async fetch(request, env, ctx) {
