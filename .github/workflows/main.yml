@@ -22,7 +22,7 @@ jobs:
       - name: Download OpenWrt Official 24.10.6 SDK
         run: |
           SDK_URL="https://downloads.openwrt.org/releases/24.10.6/targets/x86/64/openwrt-sdk-24.10.6-x86-64_gcc-13.3.0_musl.Linux-x86_64.tar.zst"
-          echo "正在下载 24.10.6 (6.6.127内核对齐) 编译工具链..."
+          echo "正在下载官方 24.10.6 编译环境..."
           wget -q --tries=5 "$SDK_URL" -O openwrt-sdk.tar.zst
           tar -I zstd -xf openwrt-sdk.tar.zst
           mv openwrt-sdk-* sdk
@@ -30,48 +30,44 @@ jobs:
       - name: Update and Install Feeds
         run: |
           cd sdk
-          # 引入 tcp-brutal 的官方 feed
+          # 引入 tcp-brutal 官方 feed 源
           echo "src-git brutal_feed https://github.com/haruue-net/openwrt-tcp-brutal.git" >> feeds.conf.default
           
+          # 替换核心镜像源，避免下载死锁
           sed -i 's/git.openwrt.org\/feed\/packages.git/github.com\/openwrt\/packages.git/g' feeds.conf.default
           sed -i 's/git.openwrt.org\/project\/luci.git/github.com\/openwrt\/luci.git/g' feeds.conf.default
           
           ./scripts/feeds update -a
           ./scripts/feeds install -a
 
-      - name: Inject Configuration (💡 强行喂饱和平演变)
+      - name: Inject Configuration
         run: |
           cd sdk
-          # 1. 强行删除可能带有坏账污染的历史配置
-          rm -f .config
+          # 强行把导致全局配置闪退的几个不相干的坏包从系统依赖里删掉
+          sed -i '/kmod-phy-bcm-ns-usb/d' package/kernel/linux/Makefile
+          sed -i '/onionshare-cli/d' feeds/packages/net/onionshare-cli/Makefile || true
           
-          # 2. 手动灌入最基础、绝对合法的平台骨架标记
-          echo "CONFIG_TARGET_x86=y" > .config
-          echo "CONFIG_TARGET_x86_64=y" >> .config
-          
-          # 3. 💡 重点：基于我们的基础骨架跑一次 defconfig，这样能生成一套完备的、欺骗系统通过校验的临时 .config
-          make defconfig
-          
-          # 4. 骨架补齐后，追加我们要编译的真正主角（根据其真正的包目录激活名）
+          # 写入目标组件激活开关
           echo "CONFIG_PACKAGE_kmod-tcp-brutal=m" >> .config
+          
+          # 让官方正规配置器跑完全程以锁定依赖
+          make defconfig
 
-      - name: Compile Target Package (💡 纯净直编)
+      - name: Compile Target Package
         run: |
           cd sdk
-          # 💡 因为配置被补齐了，现在编译器会心安理得地干活，绝不会触发弹窗
+          # 顺着通过验证的 feeds 路径全速点火编译
           make package/feeds/brutal_feed/tcp-brutal/compile V=s -j$(nproc)
 
-      - name: Collect Output Files
+      - name: Collect Output Files (💡 路径修正：精准对接最终产物库)
         run: |
           mkdir -p ../output_artifacts
           
-          echo "=== 正在全盘捕获生成的 .ipk ==="
-          find sdk/bin/ -name "*brutal*.ipk" -exec cp {} ../output_artifacts/ \; || true
+          echo "=== 正在前往 bin 目录打捞生成的官方标准安装包 ==="
+          # 💡 根据成功日志，直接去目标的 bin/targets 目录下精准提取打出来的完整安装包
+          find sdk/bin/targets/ -name "*brutal*.ipk" -exec cp {} ../output_artifacts/ \; || true
           
-          echo "=== 深度捕获底层的内核驱动 .ko ==="
-          find sdk/build_dir/ -name "*brutal*.ko" -exec cp {} ../output_artifacts/ \; || true
-          
-          echo "=== 当前捕获到的文件清单 ==="
+          echo "=== 最终打包区产物审查 ==="
           ls -la ../output_artifacts/
 
       - name: Upload Artifacts
@@ -79,3 +75,4 @@ jobs:
         with:
           name: istoreos-tcp-brutal-24.10.6
           path: output_artifacts/*
+          if-no-files-found: error
