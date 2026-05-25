@@ -3,6 +3,9 @@ name: Build-iStoreOS-Brutal
 on:
   workflow_dispatch:
 
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
 jobs:
   build:
     runs-on: ubuntu-24.04
@@ -19,39 +22,64 @@ jobs:
       - name: Download OpenWrt Official 24.10.6 SDK
         run: |
           SDK_URL="https://downloads.openwrt.org/releases/24.10.6/targets/x86/64/openwrt-sdk-24.10.6-x86-64_gcc-13.3.0_musl.Linux-x86_64.tar.zst"
+          echo "正在下载官方 24.10.6 编译环境..."
           wget -q --tries=5 "$SDK_URL" -O openwrt-sdk.tar.zst
           tar -I zstd -xf openwrt-sdk.tar.zst
           mv openwrt-sdk-* sdk
 
-      - name: Clone Raw Source Code
+      - name: Update and Install Feeds
         run: |
-          # 💡 核心操作：直接拉取最底层的 brutal 纯 C 语言源码仓库
-          git clone https://github.com/apernet/tcp-brutal.git raw-src
+          cd sdk
+          echo "src-git brutal_feed https://github.com/haruue-net/openwrt-tcp-brutal.git" >> feeds.conf.default
+          
+          sed -i 's/git.openwrt.org\/feed\/packages.git/github.com\/openwrt\/packages.git/g' feeds.conf.default
+          sed -i 's/git.openwrt.org\/project\/luci.git/github.com\/openwrt\/luci.git/g' feeds.conf.default
+          
+          ./scripts/feeds update -a
+          ./scripts/feeds install -a
 
-      - name: Hard Cross-Compile (💡 纯物理强行编译)
+      - name: Inject Configuration & Clean Bad Deps
         run: |
-          # 1. 自动定位 SDK 里的内核源码夹和编译器
+          cd sdk
+          sed -i '/kmod-phy-bcm-ns-usb/d' package/kernel/linux/Makefile
+          sed -i '/onionshare-cli/d' feeds/packages/net/onionshare-cli/Makefile || true
+          
+          echo "CONFIG_PACKAGE_kmod-tcp-brutal=m" >> .config
+          make defconfig
+
+      - name: Trigger SDK Env Prepare (💡 借鸡生蛋：强制初始化环境)
+        run: |
+          cd sdk
+          # 💡 让 SDK 自己把交叉编译器和内核源码树全部初始化出来，不要直接强行生啃
+          make package/feeds/brutal_feed/tcp-brutal/prepare V=s
+
+      - name: Advanced Cross-Compile (💡 精准降维打击)
+        run: |
+          # 1. 此时核心目录已经被 SDK 完美初始化，我们顺藤摸瓜抓出路径
           KERNEL_DIR=$(find sdk/build_dir/ -maxdepth 3 -name "linux-6.6.*" | head -n 1)
           TOOLCHAIN_BIN=$(find sdk/staging_dir/ -maxdepth 3 -name "bin" | grep "toolchain" | head -n 1)
-          CROSS_COMPILE_PREFIX=$(find $TOOLCHAIN_BIN -name "x86_64-openwrt-linux-musl-gcc" | sed 's/gcc//g')
           
+          # 2. 注入全局变量并锁死官方专用编译器前缀
           export PATH="$TOOLCHAIN_BIN:$PATH"
           export STAGING_DIR="$(pwd)/sdk/staging_dir"
           
-          # 2. 💡 绝杀：直接让内核编译器在源码目录硬生生编译出真正的驱动文件，没有任何打包工具能拦截它！
+          # 3. 重新克隆一份干净的源码到外层，强制指派刚解压出的官方专用编译器和内核头文件进行物理轰击
+          git clone https://github.com/apernet/tcp-brutal.git raw-src
           cd raw-src
-          make -C "../$KERNEL_DIR" M="$(pwd)" ARCH=x86_64 CROSS_COMPILE="$CROSS_COMPILE_PREFIX" modules
+          make -C "../$KERNEL_DIR" M="$(pwd)" ARCH=x86_64 CROSS_COMPILE="x86_64-openwrt-linux-musl-" modules
 
       - name: Collect Output Files
         run: |
-          mkdir -p ../output_artifacts
+          mkdir -p "$GITHUB_WORKSPACE/output_artifacts"
           
-          echo "=== 正在捞取纯正的 49KB 内核驱动文件 ==="
-          # 💡 这次我们只拿最纯粹的内核模块驱动
-          find raw-src/ -name "brutal.ko" -exec cp -v {} ../output_artifacts/ \;
+          echo "=== 正在捞取完全对齐 musl 架构的 49KB 纯正驱动 ==="
+          cp -v "$GITHUB_WORKSPACE/raw-src/brutal.ko" "$GITHUB_WORKSPACE/output_artifacts/" || true
           
-          echo "=== 检查成果清单 ==="
-          ls -la ../output_artifacts/
+          # 双重保险：如果系统偷偷塞进 bin 目录了，一起顺出来
+          find "$GITHUB_WORKSPACE/sdk/bin/" -name "*brutal*.ipk" -exec cp -v {} "$GITHUB_WORKSPACE/output_artifacts/" \; || true
+          
+          echo "=== 成果盘点 ==="
+          ls -la "$GITHUB_WORKSPACE/output_artifacts/"
 
       - name: Upload Artifacts
         uses: actions/upload-artifact@v4
