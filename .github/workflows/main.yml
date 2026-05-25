@@ -4,10 +4,8 @@ on:
   workflow_dispatch:
     inputs:
       sdk_url:
-        description: 'OpenWrt SDK URL (必须从官网获取并填入此处)'
+        description: '请粘贴从官网复制的 .tar.xz 完整链接 (必须匹配你的内核)'
         required: true
-        # 请务必替换下面的链接为你当前固件版本对应的 SDK 下载地址
-        default: 'https://downloads.openwrt.org/releases/24.10.6/targets/x86/64/openwrt-sdk-24.10.6-x86-64_gcc-14.2.0_musl.Linux-x86_64.tar.xz'
       package_repo:
         description: 'Package source git URL'
         required: true
@@ -27,7 +25,9 @@ jobs:
 
       - name: Setup SDK
         run: |
-          wget ${{ github.event.inputs.sdk_url }} -O sdk.tar.xz
+          # 验证 URL 是否提供
+          if [ -z "${{ github.event.inputs.sdk_url }}" ]; then echo "Error: SDK URL is empty" && exit 1; fi
+          wget "${{ github.event.inputs.sdk_url }}" -O sdk.tar.xz
           tar -xJf sdk.tar.xz
           mv openwrt-sdk-* sdk
 
