@@ -30,7 +30,7 @@ jobs:
       - name: Update and Install Feeds
         run: |
           cd sdk
-          # 仅拉取我们绝对需要的 tcp-brutal 独立源，绝不参与多余的包依赖污染
+          # 引入 tcp-brutal 的官方 feed
           echo "src-git brutal_feed https://github.com/haruue-net/openwrt-tcp-brutal.git" >> feeds.conf.default
           
           sed -i 's/git.openwrt.org\/feed\/packages.git/github.com\/openwrt\/packages.git/g' feeds.conf.default
@@ -39,24 +39,39 @@ jobs:
           ./scripts/feeds update -a
           ./scripts/feeds install -a
 
-      - name: Compile Target Package (💡 纯粹单点强攻，跳过全局依赖检查)
+      - name: Inject Configuration (💡 强行喂饱和平演变)
         run: |
           cd sdk
-          # 💡 核心改动：完全移除 make defconfig / olddefconfig
-          # 直接越过全局依赖链，单独指派编译器强行进入组件路径进行物理编译
-          make package/feeds/brutal_feed/tcp-brutal/compile V=s -j$(nproc) IGNORE_ERRORS=1
+          # 1. 强行删除可能带有坏账污染的历史配置
+          rm -f .config
+          
+          # 2. 手动灌入最基础、绝对合法的平台骨架标记
+          echo "CONFIG_TARGET_x86=y" > .config
+          echo "CONFIG_TARGET_x86_64=y" >> .config
+          
+          # 3. 💡 重点：基于我们的基础骨架跑一次 defconfig，这样能生成一套完备的、欺骗系统通过校验的临时 .config
+          make defconfig
+          
+          # 4. 骨架补齐后，追加我们要编译的真正主角（根据其真正的包目录激活名）
+          echo "CONFIG_PACKAGE_kmod-tcp-brutal=m" >> .config
+
+      - name: Compile Target Package (💡 纯净直编)
+        run: |
+          cd sdk
+          # 💡 因为配置被补齐了，现在编译器会心安理得地干活，绝不会触发弹窗
+          make package/feeds/brutal_feed/tcp-brutal/compile V=s -j$(nproc)
 
       - name: Collect Output Files
         run: |
           mkdir -p ../output_artifacts
           
-          echo "=== 全局捕获编译生成的 .ipk ==="
+          echo "=== 正在全盘捕获生成的 .ipk ==="
           find sdk/bin/ -name "*brutal*.ipk" -exec cp {} ../output_artifacts/ \; || true
           
-          echo "=== 深度捕获底层的内核内核驱动 .ko ==="
+          echo "=== 深度捕获底层的内核驱动 .ko ==="
           find sdk/build_dir/ -name "*brutal*.ko" -exec cp {} ../output_artifacts/ \; || true
           
-          echo "=== 当前收网清单 ==="
+          echo "=== 当前捕获到的文件清单 ==="
           ls -la ../output_artifacts/
 
       - name: Upload Artifacts
