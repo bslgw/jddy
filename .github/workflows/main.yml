@@ -1,4 +1,4 @@
-name: Build-iStoreOS-Brutal
+name: Build-iStoreOS-Brutal-100M
 
 on:
   workflow_dispatch:
@@ -18,40 +18,47 @@ jobs:
 
       - name: Download and Prepare SDK
         run: |
-          SDK_URL="https://downloads.openwrt.org/releases/24.10.6/targets/x86/64/openwrt-sdk-24.10.6-x86-64_gcc-13.3.0_musl.Linux-x86_64.tar.zst"
+          # 使用你指定的 24.10.6 SDK
+          SDK_URL="https://openwrt.org"
           wget -q "$SDK_URL" -O openwrt-sdk.tar.zst
           tar -I zstd -xf openwrt-sdk.tar.zst
           mv openwrt-sdk-* sdk
-          # 预先生成环境依赖，确保编译器可用
           cd sdk && make defconfig && cd ..
 
-      - name: Hard Cross-Compile
+      - name: Hard Cross-Compile with 100Mbps Patch
         run: |
-          # 1. 直接锁定绝对路径，不再进行任何搜索
+          # 1. 設置交叉編譯環境變量
           export STAGING_DIR="$(pwd)/sdk/staging_dir"
           export TOOLCHAIN_BIN="$(pwd)/sdk/staging_dir/toolchain-x86_64_gcc-13.3.0_musl/bin"
           export PATH="$TOOLCHAIN_BIN:$PATH"
           export KERNEL_DIR="$(pwd)/sdk/build_dir/target-x86_64_musl/linux-x86_64/linux-6.6.127"
           
-          echo "检查编译器: $TOOLCHAIN_BIN/x86_64-openwrt-linux-musl-gcc"
-          [ -f "$TOOLCHAIN_BIN/x86_64-openwrt-linux-musl-gcc" ] || { echo "❌ 编译器未找到"; exit 1; }
-
-          # 2. 拉取源码
-          git clone https://github.com/apernet/tcp-brutal.git raw-src
-          
-          # 3. 强制交叉编译
+          # 2. 拉取原始源碼
+          git clone https://github.com raw-src
           cd raw-src
+
+          # 3. 注入 100Mbps 保底參數代碼 (100Mbps = 12500000 Bytes/s)
+          # 添加 module_param 讓以後可以通過 insmod 動態調整
+          sed -i '1i #include <linux/moduleparam.h>' tcp_brutal.c
+          sed -i '/#include <linux\/moduleparam.h>/a static unsigned long long default_rate = 12500000;\nmodule_param(default_rate, ullong, 0644);\nMODULE_PARM_DESC(default_rate, "Default rate in bytes/s");' tcp_brutal.c
+          
+          # 在 brutal_init 函數中，強制將初始速率設為 100Mbps
+          # 尋找 cwnd_gain = 20 並在其後插入賦值
+          sed -i '/ca->cwnd_gain = 20;/a \    ca->rate = default_rate;' tcp_brutal.c
+
+          # 4. 執行交叉編譯
           make -C "$KERNEL_DIR" M="$(pwd)" ARCH=x86_64 CROSS_COMPILE="x86_64-openwrt-linux-musl-" modules
 
       - name: Collect Output Files
         run: |
           mkdir -p output_artifacts
           cp raw-src/brutal.ko output_artifacts/
-          ls -la output_artifacts/
+          # 打印模塊信息確認
+          modinfo output_artifacts/brutal.ko || true
 
       - name: Upload Artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: istoreos-tcp-brutal-24.10.6
+          name: istoreos-tcp-brutal-100M-fixed
           path: output_artifacts/
           if-no-files-found: error
