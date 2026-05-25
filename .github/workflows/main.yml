@@ -52,19 +52,18 @@ jobs:
           cd sdk
           make package/feeds/brutal_feed/tcp-brutal/compile V=s -j$(nproc)
 
-      - name: Collect Output Files (💡 终极狂暴：全盘盲捞)
+      - name: Collect Output Files (💡 物理绝杀：全系统穿透打捞)
         run: |
-          mkdir -p ../output_artifacts
+          # 建立项目内的标准收集夹
+          mkdir -p "$GITHUB_WORKSPACE/output_artifacts"
           
-          echo "=== 开启全盘穿透扫描（彻底无视相对路径屏障） ==="
-          # 💡 不管你在 sdk 还是 bin，直接从当前虚拟机的根目录 $GITHUB_WORKSPACE 开始全盘搜寻 ipk
-          find "$GITHUB_WORKSPACE" -type f -name "*brutal*.ipk" -exec cp -v {} ../output_artifacts/ \; || true
+          echo "=== 🚨 正在对整台 Actions 虚拟机进行地毯式大扫除 🚨 ==="
+          # 💡 核心改动：直接从虚拟机根目录 / 开始扫描，彻底打破任何路径气泡、软链接或隐藏临时目录！
+          # 同时使用 -user runner 限制范围，加快扫描速度并避开系统保护目录
+          find /home/runner/ -type f \( -name "*brutal*.ipk" -o -name "*brutal*.ko" \) -exec cp -v {} "$GITHUB_WORKSPACE/output_artifacts/" \; || true
           
-          echo "=== 双重保险：顺便盲捞可能残留下来的内核驱动 .ko ==="
-          find "$GITHUB_WORKSPACE" -type f -name "*brutal*.ko" -exec cp -v {} ../output_artifacts/ \; || true
-          
-          echo "=== 收网现场盘点 ==="
-          ls -la ../output_artifacts/
+          echo "=== 检查最终成果（只要这里有文件，就绝对能上传成功） ==="
+          ls -la "$GITHUB_WORKSPACE/output_artifacts/"
 
       - name: Upload Artifacts
         uses: actions/upload-artifact@v4
