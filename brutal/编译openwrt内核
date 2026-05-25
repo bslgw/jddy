@@ -1,4 +1,6 @@
-当前机器
+查看固件版本和架构
+cat /etc/openwrt_release
+
 DISTRIB_ID='iStoreOS'
 DISTRIB_RELEASE='24.10.6'
 DISTRIB_REVISION='2026041710'
@@ -6,3 +8,7 @@ DISTRIB_TARGET='x86/64'
 DISTRIB_ARCH='x86_64'
 DISTRIB_DESCRIPTION='iStoreOS 24.10.6 2026041710'
 DISTRIB_TAINTS='busybox'
+
+查看内核确切的版本签名
+cat /usr/lib/opkg/info/kernel.control | grep Version
+Version: 6.6.127~50daf8372d971124fb3519e8d87e02ae-r1
