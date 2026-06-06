@@ -1,74 +1,437 @@
-const SECRETPASSWORD = "888"; 
+const TOKEN = "888"; // 🔒 这里设置你的网页登录密码 / 机器上报 Token
+
+function replaceNodeName(link, serverName) {
+  try {
+    const hashIndex = link.indexOf("#");
+    if (hashIndex === -1) {
+      return `${link}#${encodeURIComponent(serverName)}`;
+    }
+
+    return link.substring(0, hashIndex + 1) +
+           encodeURIComponent(serverName);
+  } catch {
+    return link;
+  }
+}
+
+function displayNodeLink(link) {
+  try {
+    const hashIndex = link.indexOf("#");
+    if (hashIndex === -1) {
+      return link;
+    }
+
+    return (
+      link.substring(0, hashIndex + 1) +
+      decodeURIComponent(link.substring(hashIndex + 1))
+    );
+  } catch {
+    return link;
+  }
+}
+
+// 提取节点协议
+function getProtocol(link) {
+  try {
+    const protocol = link.split("://")[0];
+    return protocol ? protocol.toLowerCase() : "unknown";
+  } catch {
+    return "unknown";
+  }
+}
+
+function escapeHtml(str = "") {
+  return str
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
+}
 
 export default {
-  async fetch(request, env, ctx) {
+  async fetch(request, env) {
     const url = new URL(request.url);
-    if (!env.NODES_STORE) return new Response("錯誤：未綁定 KV", { status: 500 });
-    const userToken = url.searchParams.get('token');
-    if (userToken !== SECRETPASSWORD) return new Response("404 Not Found", { status: 404 });
 
-    const getProtocol = (link) => {
-      try { return link.split('://')[0].toLowerCase(); } catch (e) { return 'unknown'; }
-    };
-
-    if (url.pathname === '/api/check') {
-      const host = url.searchParams.get('host');
-      try {
-        const controller = new AbortController();
-        const timeout = setTimeout(() => controller.abort(), 2500);
-        await fetch(`http://${host}`, { mode: 'no-cors', signal: controller.signal });
-        clearTimeout(timeout);
-        return new Response(JSON.stringify({ online: true }));
-      } catch (e) { return new Response(JSON.stringify({ online: false })); }
+    if (!env.NODES_STORE) {
+      return new Response("KV not bound");
     }
 
-    if (url.pathname === '/sub') {
-      const rawData = await env.NODES_STORE.get('nodes_list');
-      let nodes = rawData ? JSON.parse(rawData) : [];
-      nodes.sort((a, b) => getProtocol(a.link).localeCompare(getProtocol(b.link)));
-      const subText = nodes.map(n => {
-        const proto = getProtocol(n.link).toUpperCase();
-        return `${n.link.split('#')[0]}#[${proto}] ${n.originalName || '未命名'}`;
-      }).join('\n');
-      return new Response(subText, { headers: { 'Content-Type': 'text/plain; charset=utf-8' } });
-    }
-
-    if (request.method === 'POST' && url.pathname === '/api/save') {
-      const { id, link, customName, isBatch } = await request.json();
-      const rawData = await env.NODES_STORE.get('nodes_list');
-      let nodes = rawData ? JSON.parse(rawData) : [];
-      if (isBatch) {
-        link.split('\n').filter(l => l.trim().includes('://')).forEach(l => {
-          nodes.push({ id: Math.random().toString(36).substr(2, 9), originalName: '批量導入', link: l.trim().split('#')[0] });
-        });
-      } else if (id) {
-        const i = nodes.findIndex(n => n.id === id);
-        if (i !== -1) nodes[i] = { id, originalName: customName, link: link.trim().split('#')[0] };
-      } else {
-        nodes.push({ id: Date.now().toString(), originalName: customName, link: link.trim().split('#')[0] });
+    // ----------------------------------------------------
+    // API 路由 1: 节点上报 (供各 VPS 上的 Shell 脚本调用)
+    // ----------------------------------------------------
+    if (
+      request.method === "POST" &&
+      url.pathname === "/api/report"
+    ) {
+      if (url.searchParams.get("token") !== TOKEN) {
+        return new Response("Forbidden", { status: 403 });
       }
-      await env.NODES_STORE.put('nodes_list', JSON.stringify(nodes));
-      return new Response(JSON.stringify({ success: true }));
+
+      const data = await request.json();
+      const { server_id, server_name, links } = data;
+
+      if (!server_id || !server_name) {
+        return new Response("invalid data", { status: 400 });
+      }
+
+      const renamedLinks = (links || []).map(link =>
+        replaceNodeName(link, server_name)
+      );
+      const raw = await env.NODES_STORE.get("servers");
+      let servers = raw ? JSON.parse(raw) : [];
+      const idx = servers.findIndex(s => s.server_id === server_id);
+      
+      const item = {
+        server_id,
+        server_name,
+        updated: new Date().toISOString(),
+        links: renamedLinks
+      };
+      if (idx >= 0) {
+        servers[idx] = item;
+      } else {
+        servers.push(item);
+      }
+
+      await env.NODES_STORE.put("servers", JSON.stringify(servers));
+      return Response.json({ success: true });
     }
 
-    if (request.method === 'POST' && url.pathname === '/api/delete') {
-      const { id } = await request.json();
-      const rawData = await env.NODES_STORE.get('nodes_list');
-      let nodes = (rawData ? JSON.parse(rawData) : []).filter(n => n.id !== id);
-      await env.NODES_STORE.put('nodes_list', JSON.stringify(nodes));
-      return new Response(JSON.stringify({ success: true }));
+    // ----------------------------------------------------
+    // API 路由 2: 删除服务器
+    // ----------------------------------------------------
+    if (
+      request.method === "POST" &&
+      url.pathname === "/api/delete"
+    ) {
+      // 兼容可能从 URL 传来的 token
+      if (url.searchParams.get("token") !== TOKEN) {
+        return new Response("Forbidden", { status: 403 });
+      }
+
+      const { server_id } = await request.json();
+      const raw = await env.NODES_STORE.get("servers");
+      let servers = raw ? JSON.parse(raw) : [];
+      servers = servers.filter(s => s.server_id !== server_id);
+      
+      await env.NODES_STORE.put("servers", JSON.stringify(servers));
+      return Response.json({ success: true });
     }
 
-    const rawData = await env.NODES_STORE.get('nodes_list');
-    const currentNodes = rawData ? JSON.parse(rawData) : [];
-    const groupedNodes = currentNodes.reduce((acc, node) => {
-      const p = getProtocol(node.link);
-      if (!acc[p]) acc[p] = [];
-      acc[p].push(node);
-      return acc;
-    }, {});
+    // ----------------------------------------------------
+    // API 路由 3: 客户端纯文本订阅下发 (如给客户端软件拉取)
+    // ----------------------------------------------------
+    if (url.pathname === "/sub") {
+      if (url.searchParams.get("token") !== TOKEN) {
+        return new Response("Forbidden", { status: 403 });
+      }
 
-    const html = `<!DOCTYPE html><html><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><title>Dae 訂閱管理</title><style>:root { --primary: #1a73e8; --success: #34a853; --danger: #ea4335; --bg: #f8f9fa; } body { font-family: system-ui, sans-serif; background: var(--bg); max-width: 750px; margin: 20px auto; padding: 0 15px; color: #333; } .header { text-align: center; margin-bottom: 25px; } .card { background: white; padding: 20px; border-radius: 16px; box-shadow: 0 4px 15px rgba(0,0,0,0.05); margin-bottom: 20px; } .sub-box { background: #fffbe6; padding: 12px; border-radius: 8px; border: 1px dashed #ffe58f; display: flex; align-items: center; justify-content: space-between; gap: 10px; } .sub-box code { font-size: 12px; word-break: break-all; color: #856404; flex: 1; } .group-tag { background: #e8f0fe; color: var(--primary); padding: 4px 12px; font-size: 11px; font-weight: bold; border-radius: 20px; margin: 15px 0 10px; display: inline-block; text-transform: uppercase; } input, textarea { width: 100%; padding: 12px; margin: 8px 0; border: 1px solid #ddd; border-radius: 8px; box-sizing: border-box; font-size: 14px; } .btn { border: none; border-radius: 8px; padding: 10px 16px; font-weight: bold; cursor: pointer; display: inline-flex; align-items: center; gap: 6px; } .btn-main { background: var(--primary); color: white; width: 100%; justify-content: center; } .btn-ghost { background: #f1f3f4; color: #5f6368; font-size: 12px; } .node-item { display: flex; justify-content: space-between; align-items: center; padding: 12px 0; border-bottom: 1px solid #f1f3f4; } .status-dot { width: 22px; text-align: center; display: inline-block; } .online { color: var(--success); } .offline { color: var(--danger); } .toast { position: fixed; top: 20px; left: 50%; transform: translateX(-50%); background: rgba(0,0,0,0.8); color: white; padding: 8px 20px; border-radius: 25px; font-size: 13px; opacity: 0; transition: 0.4s; z-index: 999; pointer-events: none; }</style></head><body><div id="toast" class="toast">操作成功</div><div class="header"><h1>🔒 訂閱管理系統</h1></div><div class="card"><h3 style="margin:0 0 12px; font-size:15px;">🔗 訂閱連結</h3><div class="sub-box"><code id="subUrl">${url.origin}/sub?token=${SECRETPASSWORD}</code><button class="btn btn-ghost" onclick="copyText('subUrl')">複製連結</button></div></div><div class="card"><div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:10px;"><h3 id="formTitle" style="margin:0; font-size:15px;">➕ 節點操作</h3><button class="btn btn-ghost" onclick="toggleBatch()" id="batchBtn">切換批量模式</button></div><input type="hidden" id="nodeId"><input type="text" id="nodeName" placeholder="節點顯示名稱"><textarea id="nodeLink" rows="3" placeholder="貼入原始連結..."></textarea><button class="btn btn-main" onclick="saveNode()" id="saveBtn">保存數據</button><button id="cancelBtn" class="btn btn-ghost" style="display:none; width:100%; margin-top:8px;" onclick="resetForm()">取消修改</button></div><div class="card"><div style="display:flex; justify-content:space-between; align-items:center;"><h3 style="margin:0; font-size:15px;">📋 節點列表 (${currentNodes.length})</h3><button class="btn btn-ghost" onclick="checkAllNodes()">🔄 重新檢測</button></div>${Object.entries(groupedNodes).map(([proto, items]) => `<div class="group-tag">${proto}</div>${items.map(n => `<div class="node-item"><div style="flex:1; min-width:0; margin-right:15px;"><div style="font-size:14px; font-weight:600;"><span id="status-${n.id}" class="status-dot">⏳</span> ${n.originalName}</div><div style="font-size:11px; color:#999; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;">${n.link}</div></div><div style="display:flex; gap:8px;"><button class="btn btn-ghost" onclick='editNode(${JSON.stringify(n)})'>📝</button><button class="btn btn-ghost" style="color:var(--danger)" onclick="deleteNode('${n.id}')">🗑️</button></div></div>`).join('')}`).join('')}</div><script>const token = new URLSearchParams(window.location.search).get('token'); const nodesList = ${JSON.stringify(currentNodes)}; let isBatchMode = false; function showToast(msg) { const t = document.getElementById('toast'); t.innerText = msg; t.style.opacity = 1; setTimeout(() => t.style.opacity = 0, 2000); } function copyText(id) { navigator.clipboard.writeText(document.getElementById(id).innerText); showToast('✅ 連結已複製'); } function toggleBatch() { isBatchMode = !isBatchMode; document.getElementById('nodeName').style.display = isBatchMode ? 'none' : 'block'; document.getElementById('batchBtn').innerText = isBatchMode ? '單個模式' : '批量模式'; } function getHost(link) { try { const match = link.match(/@([^/:?#]+)/); return match ? match[1] : null; } catch(e) { return null; } } async function checkAllNodes() { nodesList.forEach(async (n) => { const host = getHost(n.link); const el = document.getElementById('status-' + n.id); if(!host) { el.innerText = '❓'; return; } el.innerText = '⏳'; el.className = 'status-dot'; try { const res = await fetch('/api/check?token=' + token + '&host=' + host); const data = await res.json(); el.innerText = data.online ? '✅' : '❌'; el.className = 'status-dot ' + (data.online ? 'online' : 'offline'); } catch { el.innerText = '❌'; el.className = 'status-dot offline'; } }); } async function saveNode() { const res = await fetch('/api/save?token=' + token, { method: 'POST', body: JSON.stringify({ id: document.getElementById('nodeId').value, link: document.getElementById('nodeLink').value, customName: document.getElementById('nodeName').value, isBatch: isBatchMode }) }); if(res.ok) location.reload(); } function editNode(node) { isBatchMode = false; document.getElementById('nodeName').style.display = 'block'; document.getElementById('nodeId').value = node.id; document.getElementById('nodeLink').value = node.link; document.getElementById('nodeName').value = node.originalName; document.getElementById('formTitle').innerText = "📝 修改節點"; document.getElementById('cancelBtn').style.display = "block"; window.scrollTo({top: 0, behavior: 'smooth'}); } function resetForm() { location.reload(); } async function deleteNode(id) { if(confirm('確定刪除？')) { await fetch('/api/delete?token=' + token, { method: 'POST', body: JSON.stringify({ id }) }); location.reload(); } } window.onload = checkAllNodes;</script></body></html>`;
-    return new Response(html, { headers: { 'Content-Type': 'text/html; charset=utf-8' } });
+      const raw = await env.NODES_STORE.get("servers");
+      const servers = raw ? JSON.parse(raw) : [];
+      const output = [];
+      for (const server of servers) {
+        for (const link of server.links || []) {
+          output.push(link);
+        }
+      }
+
+      return new Response(output.join("\n"), {
+        headers: { "Content-Type": "text/plain;charset=utf-8" }
+      });
+    }
+
+    // ----------------------------------------------------
+    // 🔑 核心安全拦截屏障：Web UI 访问控制 (已加入 Cookie 校验防止闪烁)
+    // ----------------------------------------------------
+    const clientToken = url.searchParams.get("token");
+    const headerToken = request.headers.get("X-Access-Token");
+    
+    // 解析 Cookie 
+    const cookieHeader = request.headers.get("Cookie") || "";
+    const cookieToken = cookieHeader.match(/(?:^|; )node_manager_token=([^;]*)/)?.[1];
+    
+    // 如果 URL参数、Header、Cookie 均无正确密码，则判定为【未登录状态】
+    if (clientToken !== TOKEN && headerToken !== TOKEN && cookieToken !== TOKEN) {
+      
+      if (request.headers.get("X-Requested-With") === "XMLHttpRequest") {
+        return Response.json({ success: false, msg: "访问密码错误！" }, { status: 401 });
+      }
+
+      // 下发没有携带任何节点数据的“密码锁网页”
+      return new Response(`
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>安全认证 - Oracle Node Manager</title>
+<style>
+body { margin: 0; background: #f8fafc; font-family: system-ui, -apple-system, sans-serif; display: flex; align-items: center; justify-content: center; height: 100vh; }
+.lock-box { background: white; border: 1px solid #e2e8f0; padding: 35px 30px; border-radius: 16px; box-shadow: 0 4px 15px rgba(0,0,0,0.03); width: 100%; max-width: 360px; text-align: center; }
+.logo { font-size: 42px; margin-bottom: 12px; }
+.title { font-size: 18px; font-weight: 700; color: #1e293b; margin-bottom: 6px; }
+.desc { font-size: 13px; color: #64748b; margin-bottom: 24px; }
+.input-pwd { width: 100%; border: 1px solid #cbd5e1; border-radius: 10px; padding: 12px; font-size: 14px; box-sizing: border-box; margin-bottom: 15px; outline: none; text-align: center; transition: border 0.15s; }
+.input-pwd:focus { border-color: #2563eb; box-shadow: 0 0 0 3px rgba(37,99,235,0.1); }
+.btn-login { width: 100%; border: none; background: #2563eb; color: white; border-radius: 10px; padding: 12px; font-size: 14px; font-weight: 600; cursor: pointer; transition: background 0.2s; }
+.btn-login:hover { background: #1d4ed8; }
+</style>
+</head>
+<body>
+<div class="lock-box">
+  <div class="logo">🔒</div>
+  <div class="title">安全身份认证</div>
+  <div class="desc">系统处于保护状态，请输入访问凭证</div>
+  <input type="password" id="pwd" class="input-pwd" placeholder="请输入系统安全 TOKEN" onkeydown="if(event.key==='Enter')verify()">
+  <button class="btn-login" onclick="verify()">验证并进入</button>
+</div>
+<script>
+const urlParams = new URLSearchParams(window.location.search);
+let savedToken = urlParams.get('token') || localStorage.getItem('node_manager_token');
+
+if(savedToken) {
+  fetchDataAndRender(savedToken);
+}
+
+async function verify() {
+  const input = document.getElementById('pwd').value;
+  if(!input) return alert('请输入访问密码！');
+  fetchDataAndRender(input);
+}
+
+async function fetchDataAndRender(token) {
+  const res = await fetch(window.location.pathname, {
+    headers: { 'X-Access-Token': token, 'X-Requested-With': 'XMLHttpRequest' }
+  });
+  if(res.ok) {
+    localStorage.setItem('node_manager_token', token);
+    // 写入 Cookie 保持登录状态，过期时间 1 年
+    document.cookie = "node_manager_token=" + token + "; path=/; max-age=31536000; SameSite=Strict";
+    const html = await res.text();
+    document.open();
+    document.write(html);
+    document.close();
+    if(urlParams.has('token')) window.history.replaceState({}, '', window.location.pathname);
+  } else {
+    localStorage.removeItem('node_manager_token');
+    document.cookie = "node_manager_token=; path=/; expires=Thu, 01 Jan 1970 00:00:00 GMT;";
+    alert('认证失败：访问密码无效！');
+  }
+}
+</script>
+</body>
+</html>
+`, { headers: { "content-type": "text/html;charset=utf-8" } });
+    }
+
+    // ----------------------------------------------------
+    // 🎉 【已登录状态】代码和数据将直接顺畅下发
+    // ----------------------------------------------------
+    const raw = await env.NODES_STORE.get("servers");
+    const servers = raw ? JSON.parse(raw) : [];
+
+    const processedServers = servers.map(s => {
+      const groups = {};
+      (s.links || []).forEach(link => {
+        const proto = getProtocol(link);
+        if (!groups[proto]) groups[proto] = [];
+        groups[proto].push(link);
+      });
+      return { ...s, groups };
+    });
+
+    return new Response(`
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Oracle Node Manager</title>
+<style>
+* { box-sizing: border-box; }
+body { margin: 0; padding: 20px; background: #f8fafc; color: #334155; font-family: system-ui, -apple-system, sans-serif; }
+.container { max-width: 1000px; margin: auto; }
+.header { background: white; border: 1px solid #e2e8f0; border-radius: 14px; padding: 20px; margin-bottom: 20px; box-shadow: 0 1px 3px rgba(0,0,0,0.05); position: relative; }
+.title { font-size: 24px; font-weight: 700; color: #1e293b; margin-bottom: 4px; }
+.stats { font-size: 13px; color: #64748b; margin-bottom: 15px; }
+.sub-box { display: flex; gap: 8px; }
+.sub-input { flex: 1; border: 1px solid #cbd5e1; border-radius: 10px; background: #f1f5f9; padding: 10px 12px; font-size: 13px; color: #475569; }
+.btn { border: none; border-radius: 10px; cursor: pointer; font-weight: 600; padding: 10px 16px; font-size: 13px; transition: all 0.2s; }
+.btn-copy { background: #2563eb; color: white; }
+.btn-copy:hover { background: #1d4ed8; }
+.btn-delete { background: #fee2e2; color: #ef4444; padding: 6px 12px; font-size: 12px; }
+.btn-delete:hover { background: #fca5a5; }
+.btn-logout { position: absolute; right: 20px; top: 20px; background: #f1f5f9; color: #64748b; padding: 6px 12px; border-radius: 8px; font-size: 12px; border: none; cursor: pointer; font-weight: 600; transition: all 0.2s; }
+.btn-logout:hover { background: #fee2e2; color: #ef4444; }
+
+.server-list { display: flex; flex-direction: column; gap: 14px; }
+.card { background: white; border: 1px solid #e2e8f0; border-radius: 14px; padding: 18px; box-shadow: 0 1px 3px rgba(0,0,0,0.05); }
+.card-top { display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px; }
+
+/* 优化 1：去掉整体的不可选中限制，允许对服务器名文本块单独选择 */
+.server-info-zone { cursor: pointer; flex: 1; }
+.server-name { font-size: 18px; font-weight: 700; color: #1e293b; transition: color 0.15s; user-select: text; }
+.server-info-zone:hover .server-name { color: #2563eb; }
+
+.badge { display: inline-block; margin-left: 6px; padding: 2px 8px; border-radius: 6px; background: #f1f5f9; color: #64748b; font-size: 11px; font-weight: 500; }
+.meta { font-size: 12px; color: #94a3b8; margin-bottom: 12px; display: flex; gap: 15px; }
+
+.protocol-tags { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 10px; }
+.proto-tag { background: #eff6ff; color: #1d4ed8; border: 1px solid #bfdbfe; padding: 6px 12px; border-radius: 8px; font-size: 12px; font-weight: 600; cursor: pointer; user-select: none; transition: all 0.15s; display: inline-flex; align-items: center; gap: 6px; }
+.proto-tag:hover { background: #dbeafe; }
+.proto-tag.active { background: #1d4ed8; color: white; border-color: #1d4ed8; }
+.proto-count { background: rgba(0,0,0,0.06); padding: 1px 5px; border-radius: 4px; font-size: 10px; }
+.proto-tag.active .proto-count { background: rgba(255,255,255,0.2); }
+
+.links-container { display: none; margin-top: 12px; padding-top: 12px; border-top: 1px dashed #e2e8f0; flex-direction: column; gap: 8px; }
+.links-container.active { display: flex; }
+.link-item { display: flex; align-items: center; gap: 10px; background: #f8fafc; border: 1px solid #f1f5f9; border-radius: 8px; padding: 10px 12px; }
+.link-text { flex: 1; color: #475569; font-size: 13px; word-break: break-all; font-family: monospace; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.copy-small { flex-shrink: 0; padding: 4px 8px; border: 1px solid #cbd5e1; border-radius: 6px; background: white; color: #334155; font-size: 11px; font-weight: 600; cursor: pointer; }
+.copy-small:hover { background: #f1f5f9; border-color: #94a3b8; }
+</style>
+</head>
+<body>
+
+<div class="container">
+  <div class="header">
+    <div class="title">Oracle Node Manager</div>
+    <div class="stats">在线服务器数量：${processedServers.length}</div>
+    <button class="btn-logout" onclick="logout()">安全退出</button>
+    <div class="sub-box">
+      <input id="subUrl" class="sub-input" readonly value="${url.origin}/sub?token=${TOKEN}">
+      <button class="btn btn-copy" onclick="copySub()">复制订阅链接</button>
+    </div>
+  </div>
+
+  <div class="server-list">
+    ${processedServers.map((s, sIdx) => {
+      const protocols = Object.keys(s.groups);
+      return `
+      <div class="card" id="card-${sIdx}">
+        <div class="card-top">
+          <div class="server-info-zone" onclick="collapseAllInCard(${sIdx})">
+            <span class="server-name">${escapeHtml(s.server_name)}</span>
+            <button class="copy-small" style="margin-left:6px; vertical-align:middle;" onclick="copyLink(\`${s.server_name.replace(/\\/g,'\\\\').replace(/`/g,'\\`').replace(/\$/g,'\\$')}\`, this, event)">复制</button>
+            <span class="badge">ID: ${escapeHtml(s.server_id)}</span>
+          </div>
+          <button class="btn btn-delete" onclick="deleteServer('${s.server_id}')">删除</button>
+        </div>
+        
+        <div class="meta" onclick="collapseAllInCard(${sIdx})" style="cursor:pointer; user-select:none;">
+          <div>总节点数：${s.links?.length || 0}</div>
+          <div>更新时间：${escapeHtml(s.updated ? s.updated.replace('T', ' ').substring(0, 19) : '未知')}</div>
+        </div>
+
+        <div class="protocol-tags">
+          ${protocols.length === 0 ? '<span style="font-size:12px;color:#94a3b8;">暂无可用节点</span>' : ''}
+          ${protocols.map(proto => `
+            <div class="proto-tag" onclick="toggleProtocol(this, 'panel-${sIdx}-${proto}', event)">
+              ${proto.toUpperCase()} <span class="proto-count">${s.groups[proto].length}</span>
+            </div>
+          `).join("")}
+        </div>
+
+        ${protocols.map(proto => `
+          <div id="panel-${sIdx}-${proto}" class="links-container">
+            ${s.groups[proto].map(l => `
+              <div class="link-item">
+                <div class="link-text" title="${escapeHtml(displayNodeLink(l))}">
+                  ${escapeHtml(displayNodeLink(l))}
+                </div>
+                <button class="copy-small" onclick="copyLink(\`${l.replace(/\\/g,'\\\\').replace(/`/g,'\\`').replace(/\$/g,'\\$')}\`, this, event)">
+                  复制
+                </button>
+              </div>
+            `).join("")}
+          </div>
+        `).join("")}
+      </div>
+      `;
+    }).join("")}
+  </div>
+</div>
+
+<script>
+function copySub(){
+  const el = document.getElementById("subUrl");
+  el.select();
+  document.execCommand("copy");
+  alert("订阅链接已复制到剪贴板");
+}
+
+// 优化：增强了 copyLink 函数，支持 event 阻止事件冒泡防止折叠卡片
+async function copyLink(text, btn, event){
+  if(event) event.stopPropagation(); 
+  try {
+    await navigator.clipboard.writeText(text);
+    const old = btn.innerText;
+    btn.innerText = "已复制";
+    btn.style.background = "#2563eb";
+    btn.style.color = "white";
+    setTimeout(()=>{
+      btn.innerText = old;
+      btn.style.background = "white";
+      btn.style.color = "#334155";
+    }, 1200);
+  } catch(e) {
+    alert("复制失败");
+  }
+}
+
+function toggleProtocol(tagEl, panelId, event) {
+  if(event) event.stopPropagation();
+  const panel = document.getElementById(panelId);
+  const wasActive = tagEl.classList.contains('active');
+  const card = tagEl.closest('.card');
+  card.querySelectorAll('.proto-tag').forEach(t => t.classList.remove('active'));
+  card.querySelectorAll('.links-container').forEach(p => p.classList.remove('active'));
+  if (!wasActive) {
+    tagEl.classList.add('active');
+    panel.classList.add('active');
+  }
+}
+
+function collapseAllInCard(cardIdx) {
+  const card = document.getElementById("card-" + cardIdx);
+  if (card) {
+    card.querySelectorAll('.proto-tag').forEach(t => t.classList.remove('active'));
+    card.querySelectorAll('.links-container').forEach(p => p.classList.remove('active'));
+  }
+}
+
+async function deleteServer(serverId){
+  if(!confirm("确定要删除服务器 " + serverId + " 吗?")) return;
+  // 从 localStorage 或 cookie 中提取凭证
+  const token = localStorage.getItem('node_manager_token') || '';
+  const res = await fetch("/api/delete?token=" + encodeURIComponent(token), {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ server_id: serverId })
+  });
+  if(res.ok){
+    location.reload();
+  }else{
+    alert("删除失败");
+  }
+}
+
+function logout() {
+  localStorage.removeItem('node_manager_token');
+  // 退出时清除 Cookie
+  document.cookie = "node_manager_token=; path=/; expires=Thu, 01 Jan 1970 00:00:00 GMT;";
+  location.reload();
+}
+</script>
+</body>
+</html>
+`, { 
+      headers: { 
+        "content-type": "text/html;charset=utf-8",
+        // 优化 2：下发页面时在后端同步种入 Cookie，保障后续请求一步到位不闪烁
+        "Set-Cookie": `node_manager_token=${TOKEN}; Path=/; Max-Age=31536000; SameSite=Strict`
+      } 
+    });
   }
 };
