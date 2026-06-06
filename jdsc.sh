@@ -1,8 +1,7 @@
 #!/bin/bash
 # 与worker里填写的一样
 TOKEN="888"
-# 你的worker链接
-WORKER_URL="https://xxxx.xxxx.workers.dev"  
+WORKER_URL="https://xxxx.xxx.workers.dev"   #换上你自己的worker链接
 
 # =========================
 # 机器唯一ID
@@ -44,6 +43,9 @@ SERVER_NAME="${CITY}-${ARCH}-${SERVER_ID}"
 # =========================
 # ⭐关键修复：只取“最新订阅文件”并智能筛选端口跳跃 hysteria2
 # =========================
+# =========================
+# ⭐关键修复：只取“最新订阅文件”并智能筛选
+# =========================
 SUB_DIR="/etc/v2ray-agent/subscribe_local/default"
 
 if [ ! -d "$SUB_DIR" ]; then
@@ -56,18 +58,25 @@ LATEST_FILE=$(ls -t "$SUB_DIR" 2>/dev/null | head -n 1)
 TMP=$(mktemp)
 
 if [ -n "$LATEST_FILE" ]; then
-    # 1. 先把基础节点提取出来并去重，存入临时文件
-    cat "$SUB_DIR/$LATEST_FILE" | grep -E '://' | sed 's/\r//g' | sort -u > "${TMP}.raw"
+    # 1. 提取基础节点并【保持原顺序】去重（用 awk 代替 sort -u）
+    cat "$SUB_DIR/$LATEST_FILE" | grep -E '://' | sed 's/\r//g' | awk '!x[$0]++' > "${TMP}.raw"
     
     # 2. 通过 awk 进行智能筛选：
-    #    - 修正匹配条件为 /^hysteria2:\/\//
-    #    - 非 hysteria2 协议正常保留。
-    #    - hysteria2 协议如果存在多条，优先保留带有端口范围(如 32000-33000)或跳跃参数(mport/hop)的节点；
-    #    - 如果没有检测到端口跳跃特征，则保留默认的单端口 hysteria2 节点。
+    #    - 只保留物理顺序上最后一条（最新）的 vless 节点。
+    #    - 非 hysteria2/vless 协议正常保留。
+    #    - hysteria2 协议如果存在多条，优先保留带有端口范围(如 32000-33000)或跳跃参数(mport/hop)的节点。
     awk '
-    !/^hysteria2:\/\// { print; next }
+    /^vless:\/\// {
+        # 遇到 vless 节点时不断覆盖变量，由于保持了原顺序，最终留下的就是最底部的那一条
+        last_vless = $0
+        next
+    }
+    !/^hysteria2:\/\// { 
+        # 其他协议（如 vmess、ss 等）直接打印
+        print; next 
+    }
     /^hysteria2:\/\// {
-        # 匹配端口跳跃特征：包含端口范围（- 或 ,）或者包含 mport/hop 参数
+        # 匹配 hysteria2 端口跳跃特征
         if ($0 ~ /:[0-9]+-[0-9]+/ || $0 ~ /:[0-9]+,[0-9]+/ || $0 ~ /mport=/ || $0 ~ /hop=/) {
             hop_nodes[++hop_cnt] = $0
         } else {
@@ -75,6 +84,10 @@ if [ -n "$LATEST_FILE" ]; then
         }
     }
     END {
+        # 1. 首先输出那条最新、排在最底部的 vless 节点
+        if (last_vless != "") print last_vless
+
+        # 2. 接着输出符合筛选条件的 hysteria2 节点
         if (hop_cnt > 0) {
             for (i=1; i<=hop_cnt; i++) print hop_nodes[i]
         } else if (def_cnt > 0) {
